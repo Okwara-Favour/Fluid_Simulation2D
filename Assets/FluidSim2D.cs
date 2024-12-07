@@ -1,9 +1,13 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using UnityEngine;
 
-class FluidParticle
+
+
+public class FluidParticle
 {
     public uint id = 0;
     public Vector3 position = Vector3.zero;
@@ -11,6 +15,7 @@ class FluidParticle
     public Vector3 predictedPosition = Vector3.zero;
     public float density = 0f;
     public List<FluidParticle> neighbors = new();
+    public Vector2Int spartialPosition = Vector2Int.zero;
 }
 
 public class FluidSim2D : MonoBehaviour
@@ -31,11 +36,17 @@ public class FluidSim2D : MonoBehaviour
     public float size = 2f;
 
     readonly float mass = 1f;
-    
+
+    int subsetSize;
+    int currentSubset = 0;
+    int particlesSplit = 4;
+
     Vector2 meshSize;
     FluidParticle[] particles;
     private Matrix4x4[] particleMatrices;
+    private SpartialGrid spartialGrid;
 
+    private readonly object cellLock = new object();
     private static readonly System.Random random = new System.Random();
     // Start is called before the first frame update
     void Start()
@@ -43,7 +54,10 @@ public class FluidSim2D : MonoBehaviour
         particles = new FluidParticle[noOfParticles];
         particleMatrices = new Matrix4x4[noOfParticles];
         meshSize = particleMesh.bounds.size;
-        
+
+        spartialGrid = GetComponent<SpartialGrid>();
+        subsetSize = Mathf.CeilToInt((float)particles.Length / (float)particlesSplit);
+
         int particlesPerRow = (int)Mathf.Sqrt(noOfParticles);
         int particlesPerCol = ((int)noOfParticles - 1) / particlesPerRow + 1;
         float spacing = size * 2 + particleSpacing;
@@ -58,6 +72,22 @@ public class FluidSim2D : MonoBehaviour
                 position = new Vector3(x, y, 0),
                 velocity = Vector3.zero
             };
+        }
+
+        AddFluidParticlesToSpartialGrid();
+    }
+    /*
+    public void Sort()
+    {
+        //Will change when I get smarter
+        Array.Sort(spartialDatas, (x, y) => x.cell.CompareTo(y.cell));
+    }*/
+    void AddFluidParticlesToSpartialGrid()
+    {
+        //spartialGrid.Clear();
+        foreach (var particle in particles)
+        {
+            spartialGrid.AddFluidParticleToCell(particle);
         }
     }
 
@@ -162,13 +192,16 @@ public class FluidSim2D : MonoBehaviour
     void FindNeighbors(FluidParticle particle)
     {
         particle.neighbors.Clear();
+        var neighborsId = spartialGrid.GetNeighbors(particle.position, smoothingRadius);
 
-        foreach (var neighbor in particles)
+        foreach (var neighborId in neighborsId)
         {
+            var neighbor = particles[(int)neighborId];
+            Vector3 direction = neighbor.predictedPosition - particle.predictedPosition;
+            float distance = direction.magnitude;
+
             if (neighbor.id != particle.id)
             {
-                Vector3 direction = neighbor.predictedPosition - particle.predictedPosition;
-                float distance = direction.magnitude;
                 if (distance < smoothingRadius)
                 {
                     particle.neighbors.Add(neighbor);
@@ -176,6 +209,25 @@ public class FluidSim2D : MonoBehaviour
             }
         }
         //Debug.Log(particle.neighbors.Count);
+    }
+
+    void UpdateSpartialPosition(FluidParticle particle)
+    {
+        
+        var gridPos = spartialGrid.WorldToGridPos(particle.position);
+        if (gridPos != particle.spartialPosition)
+        {
+            var currentCell = spartialGrid.GetCell(particle.spartialPosition.x, particle.spartialPosition.y);
+            if (currentCell != null)
+            {
+                lock (cellLock)
+                {
+                    currentCell.particleIDs.Remove(particle.id);
+                    spartialGrid.AddFluidParticleToCell(particle);
+                }
+            }
+        }
+        
     }
 
     void KeepInBounds(FluidParticle particle)
@@ -213,24 +265,31 @@ public class FluidSim2D : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        Parallel.ForEach(particles, particle =>
+        int startIdx = currentSubset * subsetSize;
+        int endIdx = Mathf.Min(startIdx + subsetSize, particles.Length);
+
+        Parallel.For(startIdx, endIdx, (i) =>
         {
+            var particle = particles[i];
             particle.velocity += Vector3.down * gravity * deltaTime;
             particle.predictedPosition = particle.position + particle.velocity * deltaTime;
         });
 
-        Parallel.ForEach(particles, particle =>
+        Parallel.For(startIdx, endIdx, (i) =>
         {
+            var particle = particles[i];
             FindNeighbors(particle);
         });
 
-        Parallel.ForEach(particles, particle =>
+        Parallel.For(startIdx, endIdx, (i) =>
         {
+            var particle = particles[i];
             particle.density = CalculateDensity(particle);
         });
 
-        Parallel.ForEach(particles, particle =>
-        {   
+        Parallel.For(startIdx, endIdx, (i) =>
+        {
+            var particle = particles[i];
             Vector3 pressureForce = CalculatePressureForce(particle);
             Vector3 viscosityForce = CalculateViscosityForce2(particle);
             Vector3 totalForce = pressureForce + viscosityForce;
@@ -238,19 +297,25 @@ public class FluidSim2D : MonoBehaviour
             particle.velocity += acceleration * deltaTime;
         });
 
-        Parallel.ForEach(particles, particle =>
+        Parallel.For(startIdx, endIdx, (i) =>
         {
+            var particle = particles[i];
             particle.velocity = (float.IsNaN(particle.velocity.x) || float.IsNaN(particle.velocity.y)) ?
                                     Vector3.zero : ClampVelocity(particle.velocity, maxSpeed);
             particle.position += particle.velocity * deltaTime;
 
             KeepInBounds(particle);
+
+            UpdateSpartialPosition(particle);
+
             //Debug.Log(particle.position + " " + particle.velocity);
             particleMatrices[particle.id] = Matrix4x4.TRS(particle.position, Quaternion.identity, Vector3.one * size);
             
         });
         Graphics.DrawMeshInstanced(particleMesh, 0, particleMaterial, particleMatrices);
         //Graphics.DrawMesh(particleMesh, matrix, particleMaterial, 0);
+
+        currentSubset = (currentSubset + 1) % particlesSplit;
     }
 
     private void OnDrawGizmos()

@@ -1,0 +1,359 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#pragma kernel PopulateSpartialArray
+#pragma kernel UpdateDensities
+#pragma kernel CalculateVelocities
+#pragma kernel UpdateGravity
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct SpartialData
+{
+    int cell;
+    uint id;
+};
+
+struct CFluidParticle
+{
+    uint id;
+    float3 position;
+    float3 velocity;
+    float density;
+    float3 predictedPosition;
+    float2 spartialPosition;
+};
+
+static const int threadSize = 64;
+static const float2 float2_zero = float2(0, 0);
+static const float2 float2_one = float2(1.0, 1.0);
+static const float3 float3_zero = float3(0, 0, 0);
+static const float3 float3_one = float3(1.0, 1.0, 1.0);
+static const float pi = 3.141592654;
+static const float mass = 1;
+float2 borderBounds;
+float2 currentCellSize;
+float2 gridPosition;
+float2 gridSize;
+float timestep;
+float size;
+float gravity;
+float collisionDamp;
+float smoothingRadius;
+float targetDensity;
+float pressureMultiplier;
+float kinematicViscosity;
+int particlesCount;
+float maxSpeed;
+
+RWStructuredBuffer<float3> pressureForces;
+RWStructuredBuffer<CFluidParticle> particles;
+RWStructuredBuffer<float4x4> particleMatrices;
+RWStructuredBuffer<SpartialData> spartialCell;
+
+float3 ValidateVector(float3 v)
+{
+    if (isnan(v.x) || isnan(v.y) || isnan(v.z) ||
+        isinf(v.x) || isinf(v.y) || isinf(v.z))
+    {
+        return float3_zero;
+    }
+    return v;
+}
+
+float SmoothingKernel(float radius, float dst)
+{
+    if (dst >= radius)
+        return 0.0;
+    
+    float alpha = 10.0 / (pi * pow(radius, 5.0));
+    float volume = pow((radius - dst), 3.0);
+    return alpha * volume;
+}
+
+float SmoothingKernelDerivative(float radius, float dst)
+{
+    if (dst >= radius)
+        return 0.0;
+    
+    float alpha = 10.0 / (pi * pow(radius, 5.0));
+    float volume = 3.0 * pow((radius - dst), 2.0);
+    return -alpha * volume;
+}
+
+float ViscosityKernel(float radius, float dst)
+{
+    if (dst >= radius)
+        return 0.0;
+
+    float alpha = 45.0 / (pi * pow(radius, 6.0));
+    float volume = radius - dst;
+
+    return alpha * volume;
+}
+
+
+int TwoDGridToOneD(int x, int y)
+{
+    return y * (int) gridSize.x + x;
+}
+
+int2 WorldToGridPos(float3 pos)
+{
+    // Calculate the origin of the grid (bottom-left corner of the grid's first cell)
+    float xOrigin = gridPosition.x - ((int) gridSize.x * currentCellSize.x) / 2.0f + (currentCellSize.x / 2.0f);
+    float yOrigin = gridPosition.y - ((int) gridSize.y * currentCellSize.y) / 2.0f + (currentCellSize.y / 2.0f);
+
+    // Calculate the offset of the world position from the grid origin
+    float xOffset = pos.x - xOrigin;
+    float yOffset = pos.y - yOrigin;
+
+    // Calculate the grid coordinates by dividing the offsets by the cell size
+    int gridX = (int) round(xOffset / currentCellSize.x);
+    int gridY = (int) round(yOffset / currentCellSize.y);
+
+    return int2(gridX, gridY);
+}
+
+
+
+int GetSpartialIndex(int cell, uint id)
+{
+    int left = 0;
+    int right = (int) particlesCount - 1;
+
+    while (left <= right)
+    {
+        int mid = left + (right - left) / 2.0;
+        
+        if (spartialCell[mid].cell < cell ||
+            (spartialCell[mid].cell == cell && spartialCell[mid].id < id))
+        {
+            left = mid + 1;
+        }
+        else if (spartialCell[mid].cell > cell ||
+                 (spartialCell[mid].cell == cell && spartialCell[mid].id > id))
+        {
+            right = mid - 1;
+        }
+        else
+        {
+            return mid; // Match found
+        }
+    }
+
+    return -1; // Not found
+}
+
+float CalculateDensity(inout CFluidParticle particle)
+{ 
+    float density = 0;
+    
+    for (int i = 0; i < particlesCount; i++)
+    {
+        if (i == (int) particle.id)
+            continue;
+        CFluidParticle neighbor = particles[i];
+        float dst = length(neighbor.predictedPosition - particle.predictedPosition);
+        if (dst <= smoothingRadius)
+        {
+            float influence = SmoothingKernel(smoothingRadius, dst);
+            density += mass * influence;
+        }
+    }
+    
+    return density;
+}
+
+
+void KeepInBounds(inout CFluidParticle particle)
+{
+    float2 halfBounds = borderBounds / 2.0 - float2_one * size / 2.0;
+    
+    // Check boundaries for X-axis
+    if (abs(particle.position.x) > halfBounds.x)
+    {
+        particle.velocity *= -1.0f * collisionDamp; // Reverse velocity
+        particle.position.x = halfBounds.x * sign(particle.position.x); // Clamp position
+    }
+
+    // Check boundaries for Y-axis
+    if (abs(particle.position.y) > halfBounds.y)
+    {
+        particle.velocity *= -1.0f * collisionDamp; // Reverse velocity
+        particle.position.y = halfBounds.y * sign(particle.position.y); // Clamp position
+    }
+}
+
+float ConvertDensityToPressure(float density)
+{
+    float densityError = density - targetDensity;
+    float pressure = densityError * pressureMultiplier;
+    return pressure;
+}
+
+float3 CalculatePressureForce(inout CFluidParticle particle)
+{
+    float3 pressureForce = float3_zero;
+    
+    float particlePressure = ConvertDensityToPressure(particle.density) / pow(particle.density, 2);
+    
+    if (particle.density == 0)
+        particlePressure = 0;
+    
+    for (int i = 0; i < particlesCount; i++)
+    {
+        if (i == (int) particle.id)
+            continue;
+        CFluidParticle neighbor = particles[i];
+        float3 offset = neighbor.predictedPosition - particle.predictedPosition;
+        float dst = length(offset);
+        if (dst <= smoothingRadius)
+        {
+            float slope = SmoothingKernelDerivative(smoothingRadius, dst);
+            float3 direction = normalize(offset);
+            float neighborPressure = ConvertDensityToPressure(neighbor.density) / pow(neighbor.density, 2);
+            
+            if (neighbor.density == 0)
+                neighborPressure = 0;
+            
+            float sharedPressure = particlePressure + neighborPressure;
+            
+            float3 result = direction * sharedPressure * slope * mass;
+            
+            pressureForce += ValidateVector(result);
+        }
+    }
+    
+    return pressureForce;
+}
+
+float3 CalculateViscosityForce(inout CFluidParticle particle)
+{
+    float3 laplacianVelocity = float3_zero;
+
+    for (int i = 0; i < particlesCount; i++)
+    {
+        if (i == (int) particle.id)
+            continue;
+        
+        CFluidParticle neighbor = particles[i];
+        
+        float3 r = neighbor.predictedPosition - particle.predictedPosition;
+        float3 r_vel = neighbor.velocity - particle.velocity;
+        float r_mag = length(r);
+        float r2 = pow((r_mag), 2);
+
+        float3 gradient = r * ViscosityKernel(smoothingRadius, r_mag);
+        float arOd = dot(r, r_vel) / r2;
+        float mOd = mass / neighbor.density;
+        
+        
+        float3 result = mOd * arOd * gradient;
+        
+        laplacianVelocity += ValidateVector(result);
+    }
+    
+    return kinematicViscosity * laplacianVelocity;
+}
+
+float3 ClampVelocity(float3 velocity)
+{
+    float speed = length(velocity);
+
+        // Clamp the magnitude of the velocity vector between 0 and maxSpeed
+    if (speed > maxSpeed)
+    {
+        velocity = normalize(velocity) * maxSpeed;
+    }
+    else if (speed < -maxSpeed)
+    {
+        velocity = normalize(velocity) * -maxSpeed;
+    }
+
+    return velocity;
+}
+
+[numthreads(threadSize, 1, 1)]
+void PopulateSpartialArray(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    
+    if ((int) index >= particlesCount)
+        return;
+    
+    int2 particleGPos = WorldToGridPos(particles[index].position);
+    particles[index].spartialPosition = (float2) particleGPos;
+    spartialCell[index].cell = TwoDGridToOneD(particleGPos.x, particleGPos.y);
+    spartialCell[index].id = particles[index].id;
+    
+}
+
+[numthreads(threadSize, 1, 1)]
+void UpdateGravity(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    
+    if ((int) index >= particlesCount)
+        return;
+    particles[index].velocity += float3(0, -1, 0) * gravity * timestep;
+    particles[index].predictedPosition = particles[index].position + particles[index].velocity * timestep;
+}
+
+[numthreads(threadSize, 1, 1)]
+void UpdateDensities(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    
+    if ((int) index >= particlesCount)
+        return;
+    particles[index].density = CalculateDensity(particles[index]);   
+}
+
+[numthreads(threadSize, 1, 1)]
+void CalculateVelocities(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    
+    if ((int) index >= particlesCount)
+        return;
+    
+    float3 pressureForce = CalculatePressureForce(particles[index]);
+    float3 viscosityForce = CalculateViscosityForce(particles[index]);
+    float3 totalForce = pressureForce + viscosityForce;
+    float3 acceleration = totalForce / particles[index].density;
+    if (particles[index].density == 0)
+        acceleration = float3_zero;
+    particles[index].velocity += acceleration * timestep;
+}
+
+[numthreads(threadSize, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    uint index = id.x;
+    if ((int) index >= particlesCount)
+        return;
+
+    float3 velocity = ClampVelocity(particles[index].velocity);
+    velocity =  ClampVelocity(velocity); 
+    velocity = ValidateVector(velocity);
+    
+    particles[index].velocity = velocity;
+    
+    float3 accel = particles[index].velocity * timestep;
+    accel = ValidateVector(accel);
+    
+    particles[index].position += accel;
+    
+    KeepInBounds(particles[index]);
+    
+    float4x4 resMatrix = float4x4(
+        size, 0, 0, particles[index].position.x,
+        0, size, 0, particles[index].position.y,
+        0, 0, size, particles[index].position.z,
+        0, 0, 0, 1
+    );
+   
+    particleMatrices[index] = resMatrix;
+}

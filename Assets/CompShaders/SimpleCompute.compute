@@ -1,0 +1,65 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct SParticle
+{
+    uint id;
+    float3 position;
+    float3 velocity;
+};
+
+static const float2 float2_zero = float2(0, 0);
+static const float2 float2_one = float2(1.0, 1.0);
+float2 borderBounds;
+float timestep;
+float size;
+static const int threadSize = 64;
+
+RWStructuredBuffer<SParticle> particles;
+RWStructuredBuffer<float4x4> particleMatrices;
+
+void HandleBorderCollision(inout SParticle particle, float2 borderBounds)
+{
+    float2 halfBounds = borderBounds / 2.0 - float2_one * size / 2.0;
+    
+    // Check boundaries for X-axis
+    if (abs(particle.position.x) > halfBounds.x)
+    {
+        particle.velocity.x *= -1.0f; // Reverse velocity
+        particle.position.x = clamp(particle.position.x, -borderBounds.x, borderBounds.x); // Clamp position
+    }
+
+    // Check boundaries for Y-axis
+    if (abs(particle.position.y) > halfBounds.y)
+    {
+        particle.velocity.y *= -1.0f; // Reverse velocity
+        particle.position.y = clamp(particle.position.y, -borderBounds.y, borderBounds.y); // Clamp position
+    }
+}
+
+[numthreads(threadSize,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    uint index = id.x;
+
+    // Fetch the current particle
+    SParticle particle = particles[index];
+    
+    particle.position += particle.velocity * timestep;
+    
+    HandleBorderCollision(particle, borderBounds);
+    
+    float4x4 resMatrix = float4x4(
+        size, 0, 0, particle.position.x,
+        0, size, 0, particle.position.y,
+        0, 0, size, particle.position.z,
+        0, 0, 0, 1
+    );
+    
+    particles[index] = particle;
+    particleMatrices[index] = resMatrix;
+}
