@@ -223,7 +223,6 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 1775700698}
-  - component: {fileID: 1775700697}
   - component: {fileID: 1775700699}
   - component: {fileID: 1775700701}
   - component: {fileID: 1775700700}
@@ -234,33 +233,6 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!114 &1775700697
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1775700695}
-  m_Enabled: 0
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: f00613c69150d0844a28a273cbe8d821, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  particleCount: 2000
-  particleScale: {x: 0.2, y: 0.2, z: 0.2}
-  gravity: 0
-  surfaceFriction: 1
-  Volume: 2
-  Density: 8.4
-  stiffness: 0.02
-  stiffExp: 2
-  smoothing_length: 0.1
-  kinematic_viscosity: 0.1
-  timestep: 0.3
-  boundaryDamp: 1
-  widthConstrict: 0
-  particleMesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
-  particleMaterial: {fileID: 2100000, guid: a8678627fb05b6347805e43e0bfe88d3, type: 2}
 --- !u!4 &1775700698
 Transform:
   m_ObjectHideFlags: 0
@@ -283,25 +255,26 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1775700695}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: d65226979330e9d4aad84221f75ed9f1, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   particleMesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
   particleMaterial: {fileID: 2100000, guid: a8678627fb05b6347805e43e0bfe88d3, type: 2}
-  borderBounds: {x: 20.98, y: 9.94}
+  borderBounds: {x: 19.78, y: 9.81}
   gravity: 0
-  collisionDamp: 0.95
-  particleSpacing: -0.2
-  smoothingRadius: 0.51
-  targetDensity: 8
-  pressureMultiplier: 4.5
+  friction: 0.95
+  particleInstancedPadding: 0
+  smoothingLength: 0.51
+  restDensity: 8
+  stiffness: 4.5
   kinematicViscosity: 0.1
   deltaTime: 0.05
   noOfParticles: 3000
   maxSpeed: 3
-  size: 0.15
+  size: 0.1
+  kernelType: 2
 --- !u!114 &1775700700
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -326,25 +299,26 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1775700695}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: a8b4e8e368392c847bdf92100a6eee1b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   particleMesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
   particleMaterial: {fileID: 2100000, guid: a8678627fb05b6347805e43e0bfe88d3, type: 2}
-  borderBounds: {x: 12.4, y: 9.94}
-  gravity: 0.15
-  collisionDamp: 0.95
-  particleSpacing: -0.2
-  smoothingRadius: 0.51
-  targetDensity: 8
-  pressureMultiplier: 4.5
+  borderBounds: {x: 21, y: 9.94}
+  gravity: 0.1
+  friction: 0.95
+  particleInstancedPadding: -0.1
+  smoothingLength: 0.51
+  restDensity: 8
+  stiffness: 2
   kinematicViscosity: 0.1
-  timestep: 0.05
-  noOfParticles: 3000
+  deltaTime: 0.05
+  noOfParticles: 10000
   maxSpeed: 3
-  size: 0.13
+  size: 0.1
+  kernelType: 2
   fluidSim: {fileID: 7200000, guid: 0a2f06e9a15172747bb2eded9afa5e3f, type: 3}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:

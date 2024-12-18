@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using static UnityEngine.ParticleSystem;
 using static UnityEngine.RuleTile.TilingRuleOutput;
 using UnityEngine.WSA;
+using System.Security.Cryptography;
+using UnityEngine.UIElements;
 
 class Particle
 {
@@ -185,15 +187,9 @@ public class FluidSimulation2D : MonoBehaviour
 
     (float, Vector3) KernelFunction(Vector3 r, float h)
     {
-        float r_length = r.magnitude;
-        float q = r_length / h;
-        float factor = 0.0f;
-        float alpha = 5 / (14 * Mathf.PI * Mathf.Pow(h, 2));
-        if (q >= 0 && q < 1) factor = Mathf.Pow((2 - q), 3) - 4 * Mathf.Pow((1 - q), 3);
-        else if (q >= 1 && q < 2) factor = Mathf.Pow((2 - q), 3);
-        else if (q >= 2) factor = 0;
-
-        float w = factor * alpha;
+        float alpha = 315 / (64 * Mathf.PI * Mathf.Pow(h, 9.0f));
+        float volume = Mathf.Pow((Mathf.Pow(h, 2) - Mathf.Pow(h, 2)), 3.0f);
+        float w =  alpha * volume;
 
         //Debug.Log(w);
         return (w, w * r.normalized);
@@ -201,15 +197,11 @@ public class FluidSimulation2D : MonoBehaviour
 
     (float, Vector3, float) SpikyKernelFunction(Vector3 r, float h)
     {
-        float r_length = r.magnitude;
-        float q = r_length / h;
-        float alpha = 5 / (14 * Mathf.PI * Mathf.Pow(h, 2));
+        float alpha = 45 / (64 * Mathf.PI * Mathf.Pow(h, 6.0f));
+        float q = r.magnitude / h;
+        float volume = Mathf.Pow((Mathf.Pow(h, 2) - Mathf.Pow(h, 2)), 3.0f);
+        float w =  alpha * volume;
 
-        float factor = 0.0f;
-        if (q >= 0 && q < 1) factor = Mathf.Pow((2 - q), 3) - 4 * Mathf.Pow((1 - q), 3);
-        else if (q >= 1 && q < 2) factor = Mathf.Pow((2 - q), 3);
-
-        float w = factor * alpha;
         Vector3 gradient = w * r.normalized;
 
         // Compute the Laplacian (example with Spiky kernel)

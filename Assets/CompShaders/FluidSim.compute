@@ -1,18 +1,11 @@
 // Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel CSMain
-#pragma kernel PopulateSpartialArray
 #pragma kernel UpdateDensities
 #pragma kernel CalculateVelocities
-#pragma kernel UpdateGravity
+#pragma kernel SetPredictedPosition
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
-
-struct SpartialData
-{
-    int cell;
-    uint id;
-};
 
 struct CFluidParticle
 {
@@ -21,8 +14,14 @@ struct CFluidParticle
     float3 velocity;
     float density;
     float3 predictedPosition;
-    float2 spartialPosition;
+    int2 spartialPosition;
 };
+
+static const int Poly = 0;
+static const int Spiky = 1;
+static const int PolySpiky = 2;
+static const int SpikyPoly = 3;
+
 
 static const int threadSize = 64;
 static const float2 float2_zero = float2(0, 0);
@@ -35,21 +34,21 @@ float2 borderBounds;
 float2 currentCellSize;
 float2 gridPosition;
 float2 gridSize;
-float timestep;
+float deltaTime;
 float size;
 float gravity;
-float collisionDamp;
-float smoothingRadius;
-float targetDensity;
-float pressureMultiplier;
+float friction;
+float smoothingLength;
+float restDensity;
+float stiffness;
 float kinematicViscosity;
 int particlesCount;
 float maxSpeed;
+int kernelType;
 
 RWStructuredBuffer<float3> pressureForces;
 RWStructuredBuffer<CFluidParticle> particles;
 RWStructuredBuffer<float4x4> particleMatrices;
-RWStructuredBuffer<SpartialData> spartialCell;
 
 float3 ValidateVector(float3 v)
 {
@@ -61,23 +60,43 @@ float3 ValidateVector(float3 v)
     return v;
 }
 
-float SmoothingKernel(float radius, float dst)
+float PolyKernel(float l, float r)
 {
-    if (dst >= radius)
-        return 0.0;
-    
-    float alpha = 10.0 / (pi * pow(radius, 5.0));
-    float volume = pow((radius - dst), 3.0);
+    if (r < 0 || r > 1)
+        return 0;
+
+    float alpha = 4 / (pi * pow(l, 8));
+    float volume = pow((l * l - r * r), 3);
     return alpha * volume;
 }
 
-float SmoothingKernelDerivative(float radius, float dst)
+float PolyKernelDerivative(float l, float r)
 {
-    if (dst >= radius)
-        return 0.0;
-    
-    float alpha = 10.0 / (pi * pow(radius, 5.0));
-    float volume = 3.0 * pow((radius - dst), 2.0);
+    if (r < 0 || r > 1)
+        return 0;
+
+    float alpha = 4 / (pi * pow(l, 8));
+    float volume = 3 * pow((l * l - r * r), 2);
+    return -alpha * volume;
+}
+
+float SpikyKernel(float l, float r)
+{
+    if (r < 0 || r > 1)
+        return 0;
+
+    float alpha = 10 / (pi * pow(l, 5));
+    float volume = pow((l - r), 3);
+    return alpha * volume;
+}
+
+float SpikyKernelDerivative(float l, float r)
+{
+    if (r < 0 || r > 1)
+        return 0;
+
+    float alpha = 10 / (pi * pow(l, 5));
+    float volume = 3 * pow((l - r), 2);
     return -alpha * volume;
 }
 
@@ -92,59 +111,6 @@ float ViscosityKernel(float radius, float dst)
     return alpha * volume;
 }
 
-
-int TwoDGridToOneD(int x, int y)
-{
-    return y * (int) gridSize.x + x;
-}
-
-int2 WorldToGridPos(float3 pos)
-{
-    // Calculate the origin of the grid (bottom-left corner of the grid's first cell)
-    float xOrigin = gridPosition.x - ((int) gridSize.x * currentCellSize.x) / 2.0f + (currentCellSize.x / 2.0f);
-    float yOrigin = gridPosition.y - ((int) gridSize.y * currentCellSize.y) / 2.0f + (currentCellSize.y / 2.0f);
-
-    // Calculate the offset of the world position from the grid origin
-    float xOffset = pos.x - xOrigin;
-    float yOffset = pos.y - yOrigin;
-
-    // Calculate the grid coordinates by dividing the offsets by the cell size
-    int gridX = (int) round(xOffset / currentCellSize.x);
-    int gridY = (int) round(yOffset / currentCellSize.y);
-
-    return int2(gridX, gridY);
-}
-
-
-
-int GetSpartialIndex(int cell, uint id)
-{
-    int left = 0;
-    int right = (int) particlesCount - 1;
-
-    while (left <= right)
-    {
-        int mid = left + (right - left) / 2.0;
-        
-        if (spartialCell[mid].cell < cell ||
-            (spartialCell[mid].cell == cell && spartialCell[mid].id < id))
-        {
-            left = mid + 1;
-        }
-        else if (spartialCell[mid].cell > cell ||
-                 (spartialCell[mid].cell == cell && spartialCell[mid].id > id))
-        {
-            right = mid - 1;
-        }
-        else
-        {
-            return mid; // Match found
-        }
-    }
-
-    return -1; // Not found
-}
-
 float CalculateDensity(inout CFluidParticle particle)
 { 
     float density = 0;
@@ -155,9 +121,25 @@ float CalculateDensity(inout CFluidParticle particle)
             continue;
         CFluidParticle neighbor = particles[i];
         float dst = length(neighbor.predictedPosition - particle.predictedPosition);
-        if (dst <= smoothingRadius)
+        if (dst <= smoothingLength)
         {
-            float influence = SmoothingKernel(smoothingRadius, dst);
+            float influence = 0;
+            if (kernelType == Poly)
+            {
+                influence = PolyKernel(smoothingLength, dst);
+            }
+            else if (kernelType == Spiky)
+            {
+                influence = SpikyKernel(smoothingLength, dst);
+            }
+            else if (kernelType == PolySpiky)
+            {
+                influence = PolyKernel(smoothingLength, dst);
+            }
+            else if (kernelType == SpikyPoly)
+            {
+                influence = SpikyKernel(smoothingLength, dst);
+            }
             density += mass * influence;
         }
     }
@@ -173,22 +155,22 @@ void KeepInBounds(inout CFluidParticle particle)
     // Check boundaries for X-axis
     if (abs(particle.position.x) > halfBounds.x)
     {
-        particle.velocity *= -1.0f * collisionDamp; // Reverse velocity
+        particle.velocity.x *= -1.0f * friction; // Reverse velocity
         particle.position.x = halfBounds.x * sign(particle.position.x); // Clamp position
     }
 
     // Check boundaries for Y-axis
     if (abs(particle.position.y) > halfBounds.y)
     {
-        particle.velocity *= -1.0f * collisionDamp; // Reverse velocity
+        particle.velocity.y *= -1.0f * friction; // Reverse velocity
         particle.position.y = halfBounds.y * sign(particle.position.y); // Clamp position
     }
 }
 
 float ConvertDensityToPressure(float density)
 {
-    float densityError = density - targetDensity;
-    float pressure = densityError * pressureMultiplier;
+    float densityError = density - restDensity;
+    float pressure = densityError * stiffness;
     return pressure;
 }
 
@@ -198,9 +180,6 @@ float3 CalculatePressureForce(inout CFluidParticle particle)
     
     float particlePressure = ConvertDensityToPressure(particle.density) / pow(particle.density, 2);
     
-    if (particle.density == 0)
-        particlePressure = 0;
-    
     for (int i = 0; i < particlesCount; i++)
     {
         if (i == (int) particle.id)
@@ -208,15 +187,27 @@ float3 CalculatePressureForce(inout CFluidParticle particle)
         CFluidParticle neighbor = particles[i];
         float3 offset = neighbor.predictedPosition - particle.predictedPosition;
         float dst = length(offset);
-        if (dst <= smoothingRadius)
+        if (dst <= smoothingLength)
         {
-            float slope = SmoothingKernelDerivative(smoothingRadius, dst);
+            float slope = 0;
+            if (kernelType == Poly)
+            {
+                slope = PolyKernelDerivative(smoothingLength, dst);
+            }
+            else if (kernelType == Spiky)
+            {
+                slope = SpikyKernelDerivative(smoothingLength, dst);
+            }
+            else if (kernelType == PolySpiky)
+            {
+                slope = SpikyKernelDerivative(smoothingLength, dst);
+            }
+            else if (kernelType == SpikyPoly)
+            {
+                slope = PolyKernelDerivative(smoothingLength, dst);
+            }
             float3 direction = normalize(offset);
-            float neighborPressure = ConvertDensityToPressure(neighbor.density) / pow(neighbor.density, 2);
-            
-            if (neighbor.density == 0)
-                neighborPressure = 0;
-            
+            float neighborPressure = max(ConvertDensityToPressure(neighbor.density) / pow(neighbor.density, 2), 0);
             float sharedPressure = particlePressure + neighborPressure;
             
             float3 result = direction * sharedPressure * slope * mass;
@@ -244,7 +235,7 @@ float3 CalculateViscosityForce(inout CFluidParticle particle)
         float r_mag = length(r);
         float r2 = pow((r_mag), 2);
 
-        float3 gradient = r * ViscosityKernel(smoothingRadius, r_mag);
+        float3 gradient = r * ViscosityKernel(smoothingLength, r_mag);
         float arOd = dot(r, r_vel) / r2;
         float mOd = mass / neighbor.density;
         
@@ -275,29 +266,14 @@ float3 ClampVelocity(float3 velocity)
 }
 
 [numthreads(threadSize, 1, 1)]
-void PopulateSpartialArray(uint3 id : SV_DispatchThreadID)
+void SetPredictedPosition(uint3 id : SV_DispatchThreadID)
 {
     uint index = id.x;
     
     if ((int) index >= particlesCount)
         return;
-    
-    int2 particleGPos = WorldToGridPos(particles[index].position);
-    particles[index].spartialPosition = (float2) particleGPos;
-    spartialCell[index].cell = TwoDGridToOneD(particleGPos.x, particleGPos.y);
-    spartialCell[index].id = particles[index].id;
-    
-}
-
-[numthreads(threadSize, 1, 1)]
-void UpdateGravity(uint3 id : SV_DispatchThreadID)
-{
-    uint index = id.x;
-    
-    if ((int) index >= particlesCount)
-        return;
-    particles[index].velocity += float3(0, -1, 0) * gravity * timestep;
-    particles[index].predictedPosition = particles[index].position + particles[index].velocity * timestep;
+    float3 accel = particles[index].velocity * deltaTime;
+    particles[index].predictedPosition = particles[index].position + ValidateVector(accel);
 }
 
 [numthreads(threadSize, 1, 1)]
@@ -320,11 +296,10 @@ void CalculateVelocities(uint3 id : SV_DispatchThreadID)
     
     float3 pressureForce = CalculatePressureForce(particles[index]);
     float3 viscosityForce = CalculateViscosityForce(particles[index]);
-    float3 totalForce = pressureForce + viscosityForce;
+    float3 gravityForce = float3(0, -1, 0) * gravity;
+    float3 totalForce = pressureForce + viscosityForce + gravityForce;
     float3 acceleration = totalForce / particles[index].density;
-    if (particles[index].density == 0)
-        acceleration = float3_zero;
-    particles[index].velocity += acceleration * timestep;
+    particles[index].velocity += acceleration * deltaTime;
 }
 
 [numthreads(threadSize, 1, 1)]
@@ -341,7 +316,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     
     particles[index].velocity = velocity;
     
-    float3 accel = particles[index].velocity * timestep;
+    float3 accel = particles[index].velocity * deltaTime;
     accel = ValidateVector(accel);
     
     particles[index].position += accel;

@@ -3,8 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Unity.Mathematics;
 using UnityEngine;
-
 
 
 public class FluidParticle
@@ -24,16 +24,26 @@ public class FluidSim2D : MonoBehaviour
     public Material particleMaterial;
     public Vector2 borderBounds;
     public float gravity;
-    public float collisionDamp;
-    public float particleSpacing;
-    public float smoothingRadius = 0.2f;
-    public float targetDensity = 0.5f;
-    public float pressureMultiplier = 1f;
+    public float friction;
+    public float particleInstancedPadding;
+    public float smoothingLength = 0.2f;
+    public float restDensity = 0.5f;
+    public float stiffness = 1f;
     public float kinematicViscosity = 0.00001f;
     public float deltaTime = 0.2f;
     public uint noOfParticles = 20;
     public float maxSpeed = 5f;
     public float size = 2f;
+
+    public enum KernelType
+    {
+        Poly,
+        Spiky,
+        PolySpiky,
+        SpikyPoly
+    }
+
+    public KernelType kernelType = KernelType.Poly;
 
     readonly float mass = 1f;
 
@@ -58,30 +68,41 @@ public class FluidSim2D : MonoBehaviour
         spartialGrid = GetComponent<SpartialGrid>();
         subsetSize = Mathf.CeilToInt((float)particles.Length / (float)particlesSplit);
 
-        int particlesPerRow = (int)Mathf.Sqrt(noOfParticles);
-        int particlesPerCol = ((int)noOfParticles - 1) / particlesPerRow + 1;
-        float spacing = size * 2 + particleSpacing;
+        float padding = size * 2 + particleInstancedPadding;
 
-        for(int i = 0; i < noOfParticles; i++)
+        int particlesPerAxis = Mathf.CeilToInt(Mathf.Sqrt(noOfParticles)); // Use square root for 2D arrangement
+
+        int index = 0;
+        for (int x = 0; x < particlesPerAxis; x++) // Loop through x-axis
         {
-            float x = (i % particlesPerRow - particlesPerRow / 2f + 0.5f) * spacing;
-            float y = (i / particlesPerRow - particlesPerCol / 2f + 0.5f) * spacing;
-            particles[i] = new FluidParticle
+            for (int y = 0; y < particlesPerAxis && index < noOfParticles; y++) // Loop through y-axis
             {
-                id = (uint)i,
-                position = new Vector3(x, y, 0),
-                velocity = Vector3.zero
-            };
+                particles[index] = new FluidParticle
+                {
+                    id = (uint)index,
+                    position = new Vector3(
+                        (x - particlesPerAxis / 2f + size) * padding, // Calculate x position
+                        (y - particlesPerAxis / 2f + size) * padding, // Calculate y position
+                        0 // z is 0 for 2D
+                    ),
+                    velocity = Vector3.zero,
+                    predictedPosition = Vector3.zero
+                };
+                index++; // Move to the next particle
+            }
         }
 
         AddFluidParticlesToSpartialGrid();
     }
-    /*
-    public void Sort()
+    Vector3 ValidateVector(Vector3 v)
     {
-        //Will change when I get smarter
-        Array.Sort(spartialDatas, (x, y) => x.cell.CompareTo(y.cell));
-    }*/
+        if (float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z) ||
+            float.IsInfinity(v.x) || float.IsInfinity(v.y) || float.IsInfinity(v.z))
+        {
+            return Vector3.zero;
+        }
+        return v;
+    }
     void AddFluidParticlesToSpartialGrid()
     {
         //spartialGrid.Clear();
@@ -91,26 +112,48 @@ public class FluidSim2D : MonoBehaviour
         }
     }
 
-    float SmoothingKernel(float radius, float dst)
+    float PolyKernel(float l, float r)
     {
-        float alpha = 10 / (Mathf.PI * Mathf.Pow(radius,5));
-        float volume = Mathf.Pow((radius - dst), 3);
+        if (r < 0 || r > 1) return 0;
+
+        float alpha = 4 / (Mathf.PI * Mathf.Pow(l, 8));
+        float volume = Mathf.Pow((l * l - r * r), 3);
         return alpha * volume;
     }
 
-    float SmoothingKernelDerivative(float radius, float dst)
+    float PolyKernelDerivative(float l, float r)
     {
-        float alpha = 10 / (Mathf.PI * Mathf.Pow(radius, 5));
-        float volume = 3 * Mathf.Pow((radius - dst), 2);
+        if (r < 0 || r > 1) return 0;
+
+        float alpha = 4 / (Mathf.PI * Mathf.Pow(l, 8));
+        float volume = 3 * Mathf.Pow((l * l - r * r), 2);
         return -alpha * volume;
     }
 
-    float Viscositykernel(float radius, float dst)
+    float SpikyKernel(float l, float r)
     {
-        if (dst >= radius) return 0f;
+        if (r < 0 || r > 1) return 0;
 
-        float alpha = 45f / (Mathf.PI * Mathf.Pow(radius, 6));
-        float volume = radius - dst;
+        float alpha = 10 / (Mathf.PI * Mathf.Pow(l,5));
+        float volume = Mathf.Pow((l - r), 3);
+        return alpha * volume;
+    }
+
+    float SpikyKernelDerivative(float l, float r)
+    {
+        if (r < 0 || r > 1) return 0;
+
+        float alpha = 10 / (Mathf.PI * Mathf.Pow(l, 5));
+        float volume = 3 * Mathf.Pow((l - r), 2);
+        return -alpha * volume;
+    }
+
+    float Viscositykernel(float l, float r)
+    {
+        if (r >= l) return 0f;
+
+        float alpha = 45f / (Mathf.PI * Mathf.Pow(l, 6));
+        float volume = l - r;
 
         return alpha * volume;
     }
@@ -121,14 +164,31 @@ public class FluidSim2D : MonoBehaviour
         float particlePressure = ConvertDensityToPressure(particle.density) / Mathf.Pow(particle.density, 2);
         foreach (var neighbor in particle.neighbors)
         {
-            if (neighbor.id == particle.id) continue;
+            //if (neighbor.id == particle.id) continue;
             Vector3 offset = neighbor.predictedPosition - particle.predictedPosition;
             float dst = offset.magnitude;
-            float slope = SmoothingKernelDerivative(smoothingRadius, dst);
+            float slope = 0;
+            if (kernelType == KernelType.Poly)
+            {
+                slope = PolyKernelDerivative(smoothingLength, dst);
+            }
+            else if (kernelType == KernelType.Spiky)
+            {
+                slope = SpikyKernelDerivative(smoothingLength, dst);
+            }
+            else if (kernelType == KernelType.PolySpiky)
+            {
+                slope = SpikyKernelDerivative(smoothingLength, dst);
+            }
+            else if (kernelType == KernelType.SpikyPoly)
+            {
+                slope = PolyKernelDerivative(smoothingLength, dst);
+            }
             Vector3 dir = offset.normalized;
-            float neighborPressure = ConvertDensityToPressure(neighbor.density) / Mathf.Pow(neighbor.density, 2);
-            float sharedPressure = particlePressure + neighborPressure;
-            pressureForce += sharedPressure * dir * slope * mass;
+            float neighborPressure = Mathf.Max(ConvertDensityToPressure(neighbor.density) / Mathf.Pow(neighbor.density, 2), 0);
+            float pressure = particlePressure + neighborPressure;
+            Vector3 result = pressure * dir * slope * mass;
+            pressureForce += ValidateVector(result);
         }
         return pressureForce;
     }
@@ -144,11 +204,12 @@ public class FluidSim2D : MonoBehaviour
             float r_mag = r.magnitude;
             float r2 = Mathf.Pow((r_mag), 2);
 
-            Vector3 gradient = r * Viscositykernel(smoothingRadius, r_mag);
+            Vector3 gradient = r * Viscositykernel(smoothingLength, r_mag);
             float arOd = Vector3.Dot(r, r_vel) / r2;
             float mOd = mass / neighbor.density;
 
-            laplacianVelocity += mOd * arOd * gradient;
+            Vector3 result = mOd * arOd * gradient;
+            laplacianVelocity += ValidateVector(result);
         }
 
         return kinematicViscosity * laplacianVelocity;
@@ -163,7 +224,23 @@ public class FluidSim2D : MonoBehaviour
             //if (neighbor.id == particle.id) continue;
 
             float dst = (neighbor.predictedPosition - particle.predictedPosition).magnitude;
-            float influence = SmoothingKernel(smoothingRadius, dst);
+            float influence = 0;
+            if (kernelType == KernelType.Poly)
+            {
+                influence = PolyKernel(smoothingLength, dst);
+            }
+            else if (kernelType == KernelType.Spiky)
+            {
+                influence = SpikyKernel(smoothingLength, dst);
+            }
+            else if (kernelType == KernelType.PolySpiky)
+            {
+                influence = PolyKernel(smoothingLength, dst);
+            }
+            else if (kernelType == KernelType.SpikyPoly)
+            {
+                influence = SpikyKernel(smoothingLength, dst);
+            }
             density += mass * influence;
         }
         return density;
@@ -171,8 +248,8 @@ public class FluidSim2D : MonoBehaviour
 
     float ConvertDensityToPressure(float density)
     {
-        float densityError = density - targetDensity;
-        float pressure = densityError * pressureMultiplier;
+        float densityError = density - restDensity;
+        float pressure = densityError * stiffness;
         return pressure;
     }
 
@@ -192,7 +269,7 @@ public class FluidSim2D : MonoBehaviour
     void FindNeighbors(FluidParticle particle)
     {
         particle.neighbors.Clear();
-        var neighborsId = spartialGrid.GetNeighbors(particle.position, smoothingRadius);
+        var neighborsId = spartialGrid.GetNeighbors(particle.predictedPosition, smoothingLength);
 
         foreach (var neighborId in neighborsId)
         {
@@ -202,7 +279,7 @@ public class FluidSim2D : MonoBehaviour
 
             if (neighbor.id != particle.id)
             {
-                if (distance < smoothingRadius)
+                if (distance < smoothingLength)
                 {
                     particle.neighbors.Add(neighbor);
                 }
@@ -237,12 +314,12 @@ public class FluidSim2D : MonoBehaviour
         if(Mathf.Abs(particle.position.x) > halfBounds.x)
         {
             particle.position.x = halfBounds.x * Mathf.Sign(particle.position.x);
-            particle.velocity.x *= -1 * collisionDamp;
+            particle.velocity.x *= -1 * friction;
         }
         if (Mathf.Abs(particle.position.y) > halfBounds.y)
         {
             particle.position.y = halfBounds.y * Mathf.Sign(particle.position.y);
-            particle.velocity.y *= -1 * collisionDamp;
+            particle.velocity.y *= -1 * friction;
         }
     }
 
@@ -265,14 +342,17 @@ public class FluidSim2D : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        int startIdx = currentSubset * subsetSize;
-        int endIdx = Mathf.Min(startIdx + subsetSize, particles.Length);
+        //int startIdx = currentSubset * subsetSize;
+        //int endIdx = Mathf.Min(startIdx + subsetSize, particles.Length);
+
+        int startIdx = 0;
+        int endIdx = particles.Length;
 
         Parallel.For(startIdx, endIdx, (i) =>
         {
             var particle = particles[i];
-            particle.velocity += Vector3.down * gravity * deltaTime;
-            particle.predictedPosition = particle.position + particle.velocity * deltaTime;
+            Vector3 accel = particle.velocity * deltaTime;
+            particle.predictedPosition = particle.position + ValidateVector(accel);
         });
 
         Parallel.For(startIdx, endIdx, (i) =>
@@ -292,7 +372,8 @@ public class FluidSim2D : MonoBehaviour
             var particle = particles[i];
             Vector3 pressureForce = CalculatePressureForce(particle);
             Vector3 viscosityForce = CalculateViscosityForce2(particle);
-            Vector3 totalForce = pressureForce + viscosityForce;
+            Vector3 gravityForce = Vector3.down * gravity * mass;
+            Vector3 totalForce = pressureForce + viscosityForce + gravityForce;
             Vector3 acceleration = totalForce / particle.density;
             particle.velocity += acceleration * deltaTime;
         });
@@ -300,9 +381,10 @@ public class FluidSim2D : MonoBehaviour
         Parallel.For(startIdx, endIdx, (i) =>
         {
             var particle = particles[i];
-            particle.velocity = (float.IsNaN(particle.velocity.x) || float.IsNaN(particle.velocity.y)) ?
-                                    Vector3.zero : ClampVelocity(particle.velocity, maxSpeed);
-            particle.position += particle.velocity * deltaTime;
+            particle.velocity = ClampVelocity(particle.velocity, maxSpeed);
+            particle.velocity = ValidateVector(particle.velocity);
+            Vector3 accel = particle.velocity * deltaTime;
+            particle.position += ValidateVector(accel);
 
             KeepInBounds(particle);
 
